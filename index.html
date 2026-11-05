@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Hercule Trading is a quantitative high-frequency trading firm bringing liquidity to the world's frontier markets.">
+<meta property="og:title" content="Hercule Trading">
+<meta property="og:description" content="A quantitative high-frequency trading firm bringing liquidity to the world's frontier markets.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='118' fill='%23F1F1EC'/%3E%3Cg fill='%23171717'%3E%3Crect x='135' y='146' width='58' height='220' rx='4'/%3E%3Crect x='319' y='146' width='58' height='220' rx='4'/%3E%3Crect x='193' y='223' width='126' height='18'/%3E%3Crect x='193' y='258' width='126' height='18'/%3E%3C/g%3E%3C/svg%3E">
+<title>Hercule Trading</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400&display=swap">
+<style>
+  /* Layout: a full-height dark field, three nested wireframe spheres that bulge into coloured wave strands under the pointer, one line under it. */
+  :root {
+    --bg: #08080a;
+    --fg: #e9e9e4;
+    --muted: #6f6f6a;
+    --wire: 233, 233, 228;        /* rgb of the mesh lines */
+    --font: "Geist", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) { --bg: #f5f5f1; --fg: #121212; --muted: #80807a; --wire: 18, 18, 18; color-scheme: light; }
+  }
+  :root[data-theme="light"] { --bg: #f5f5f1; --fg: #121212; --muted: #80807a; --wire: 18, 18, 18; color-scheme: light; }
+
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: var(--font); font-weight: 300; font-size: 15px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased; overflow: hidden;
+    display: flex; flex-direction: column;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 0;
+  }
+  .stage { flex: 1 1 auto; min-height: 0; position: relative; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+  .line {
+    flex: 0 0 auto; text-align: center; padding-block: 8px 40px; margin: 0;
+    font-size: 15px; letter-spacing: 0.01em; text-wrap: balance;
+  }
+  .line b { font-weight: 400; }
+  .line span { color: var(--muted); }
+</style>
+
+</head>
+<body>
+<div class="stage"><canvas id="c" aria-label="Interactive wireframe: three nested spheres. Move the pointer across them to deform them."></canvas></div>
+<p class="line"><b>Hercule Trading</b> <span>is a quantitative high-frequency trading firm bringing liquidity to the world's frontier markets.</span></p>
+
+<script>
+(function () {
+  var canvas = document.getElementById('c');
+  var gl = canvas.getContext('webgl', { antialias: true, alpha: false, premultipliedAlpha: false, powerPreference: 'high-performance' });
+  if (!gl || !gl.getExtension('OES_element_index_uint')) return;
+  var dpr = 1, W = 0, H = 0, cx = 0, cy = 0, R = 0;
+  var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---- three nested lat/long spheres, one buffer ----
+  var RADII = [1.0, 0.74, 0.48];
+  var LAT = 170, LON = 250;
+  var NS = (LAT + 1) * LON, N = NS * RADII.length;
+  var verts = new Float32Array(N * 4);          // unit direction xyz, sphere radius w
+  var segs = [];
+  for (var si = 0; si < RADII.length; si++) {
+    var base = si * NS;
+    for (var i = 0; i <= LAT; i++) {
+      var th = Math.PI * i / LAT, s = Math.sin(th), c = Math.cos(th);
+      for (var j = 0; j < LON; j++) {
+        var ph = 2 * Math.PI * j / LON, k = (base + i * LON + j) * 4;
+        verts[k] = s * Math.cos(ph); verts[k + 1] = c; verts[k + 2] = s * Math.sin(ph); verts[k + 3] = RADII[si];
+      }
+    }
+    for (var i3 = 0; i3 <= LAT; i3++) for (var j3 = 0; j3 < LON; j3++) {
+      var k0 = base + i3 * LON + j3;
+      if (i3 > 0 && i3 < LAT) segs.push(k0, base + i3 * LON + (j3 + 1) % LON);
+      if (i3 < LAT) segs.push(k0, k0 + LON);
+    }
+  }
+  var idx = new Uint32Array(segs);
+
+  // ---- the wave strands: each is a copy of the mesh pushed out by its own bump, in its own muted colour ----
+  var LAYERS = [
+    { col: [150, 85, 85],   a: 0.06, pw: 0.9, off: [ 0.05, 0.03, -0.02], w1: 0.9, p1: 0.0, k1: [6, 2, 4],  w2: 1.3 },   // dusty red
+    { col: [85, 150, 105],  a: 0.05, pw: 1.3, off: [-0.04, 0.05,  0.03], w1: 1.2, p1: 1.7, k1: [3, 6, -5], w2: 0.8 },   // green
+    { col: [80, 100, 210],  a: 0.07, pw: 1.1, off: [ 0.02, -0.05, 0.04], w1: 0.7, p1: 3.1, k1: [-5, 3, 6], w2: 1.1 },   // blue
+    { col: [200, 130, 150], a: 0.045, pw: 1.6, off: [-0.05, -0.02, -0.04], w1: 1.5, p1: 0.8, k1: [4, -6, 3], w2: 1.6 },  // pink
+    { col: [110, 170, 160], a: 0.04, pw: 0.8, off: [ 0.03, 0.06,  0.05], w1: 1.0, p1: 2.4, k1: [-6, -3, 5], w2: 0.6 }   // teal
+  ];
+  var MAXT = 24;
+
+  // ---- shaders ----
+  var VS = [
+    'attribute vec4 aPos;',
+    'uniform mat3 uM; uniform vec2 uScale; uniform float uT; uniform float uIdle;',
+    'uniform int uTN; uniform vec4 uTouch[' + MAXT + ']; uniform float uTouchR[' + MAXT + '];',
+    'uniform float uAmp; uniform float uPow; uniform vec3 uOff; uniform vec3 uK1; uniform float uW1; uniform float uP1; uniform float uW2;',
+    'varying float vE; varying float vZ; varying float vR;',
+    'void main() {',
+    '  vec3 n = aPos.xyz; float r = aPos.w; float e = 0.0;',
+    '  for (int i = 0; i < ' + MAXT + '; i++) {',
+    '    if (i >= uTN) break;',
+    '    if (abs(uTouchR[i] - r) > 0.01) continue;',
+    '    vec3 d = n - normalize(uTouch[i].xyz + uOff);',
+    '    e += uTouch[i].w * exp(-dot(d, d) * 3.2);',
+    '  }',
+    '  e = min(e, 1.0);',
+    '  float el = pow(e, uPow);',
+    '  float idle = 0.004 * sin(4.0 * n.y + 2.0 * n.x + uT * 1.1) * sin(3.0 * n.z - uT * 0.8);',
+    '  float d = idle * uIdle + uAmp * el * (1.0 + 0.16 * sin(uT * uW1 + uP1)) + 0.22 * uAmp * el * sin(dot(uK1, n) + uT * uW2);',
+    '  vec3 v = uM * (n * r * (1.0 + d));',
+    '  vE = e; vZ = v.z; vR = r;',
+    '  gl_Position = vec4(v.x * uScale.x, v.y * uScale.y, 0.0, 1.0);',
+    '}'
+  ].join('\n');
+  var FS = [
+    'precision mediump float;',
+    'uniform vec3 uColor; uniform vec3 uColor1; uniform vec3 uColor2; uniform float uAlphaF; uniform float uAlphaB; uniform float uLayer;',
+    'varying float vE; varying float vZ; varying float vR;',
+    'void main() {',
+    '  float a = vZ > 0.0 ? uAlphaF : uAlphaB;',
+    '  float w = smoothstep(0.05, 0.22, vE);',
+    '  a *= uLayer > 0.5 ? w : (1.0 - 0.85 * w);',
+    '  if (a < 0.004) discard;',
+    '  vec3 col = uLayer > 0.5 ? uColor : (vR > 0.9 ? uColor : (vR > 0.6 ? uColor1 : uColor2));',
+    '  gl_FragColor = vec4(col, a);',
+    '}'
+  ].join('\n');
+  function shader(type, src) {
+    var sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) { console.error(gl.getShaderInfoLog(sh)); return null; }
+    return sh;
+  }
+  var prog = gl.createProgram();
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(prog)); return; }
+  gl.useProgram(prog);
+  var U = {};
+  ['uM','uScale','uT','uIdle','uTN','uTouch','uTouchR','uAmp','uPow','uOff','uK1','uW1','uP1','uW2','uColor','uColor1','uColor2','uAlphaF','uAlphaB','uLayer']
+    .forEach(function (nm) { U[nm] = gl.getUniformLocation(prog, nm); });
+
+  var vbo = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+  var aPos = gl.getAttribLocation(prog, 'aPos'); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 4, gl.FLOAT, false, 0, 0);
+  var ibo = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.disable(gl.DEPTH_TEST);
+
+  // ---- theme ----
+  var wire = [233/255, 233/255, 228/255], bg = [8/255, 8/255, 10/255];
+  function readTheme() {
+    var cs = getComputedStyle(document.documentElement);
+    var v = cs.getPropertyValue('--wire').split(',');
+    if (v.length === 3) wire = v.map(function (n) { return +n / 255; });
+    var b = getComputedStyle(document.body).backgroundColor.match(/\d+/g);
+    if (b && b.length >= 3) bg = [b[0] / 255, b[1] / 255, b[2] / 255];
+  }
+  readTheme();
+  new MutationObserver(readTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  if (window.matchMedia) matchMedia('(prefers-color-scheme: light)').addEventListener('change', readTheme);
+
+  // ---- sizing ----
+  function resize() {
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    var rc = canvas.getBoundingClientRect();
+    W = rc.width; H = rc.height;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    cx = W / 2; cy = H / 2;
+    R = Math.min(W / 2.9, H / 2.5);
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  // ---- transform ----
+  var TILT = 0.32;
+  var m = null, inv = null;
+  function mul(a, b) {
+    var o = new Array(9);
+    for (var i = 0; i < 3; i++) for (var j = 0; j < 3; j++)
+      o[i*3+j] = a[i*3]*b[j] + a[i*3+1]*b[3+j] + a[i*3+2]*b[6+j];
+    return o;
+  }
+  function ap(mm, x, y, z) { return [mm[0]*x+mm[1]*y+mm[2]*z, mm[3]*x+mm[4]*y+mm[5]*z, mm[6]*x+mm[7]*y+mm[8]*z]; }
+  function updateMat(t) {
+    var spin = reduce ? 0 : t * 0.05;
+    var cs = Math.cos(spin), ss = Math.sin(spin), ct = Math.cos(TILT), st = Math.sin(TILT);
+    m = mul([1,0,0, 0,ct,-st, 0,st,ct], [cs,0,ss, 0,1,0, -ss,0,cs]);
+    inv = [m[0],m[3],m[6], m[1],m[4],m[7], m[2],m[5],m[8]];
+  }
+  updateMat(0);
+
+  // ---- pointer -> touches: the innermost sphere under the pointer takes the bump ----
+  var touches = [], ptr = { on: false, x: 0, y: 0 };
+  function hit(x, y) {
+    var u = (x - cx) / R, v = -(y - cy) / R, q = u * u + v * v;
+    for (var si = RADII.length - 1; si >= 0; si--) {
+      var r = RADII[si];
+      if (q <= r * r) {
+        var w = Math.sqrt(r * r - q), p = ap(inv, u / r, v / r, w / r);
+        return { x: p[0], y: p[1], z: p[2], r: r };
+      }
+    }
+    return null;
+  }
+  canvas.addEventListener('pointermove', function (e) {
+    var rc = canvas.getBoundingClientRect(); ptr.on = true; ptr.x = e.clientX - rc.left; ptr.y = e.clientY - rc.top;
+  });
+  canvas.addEventListener('pointerdown', function (e) {
+    var rc = canvas.getBoundingClientRect(); ptr.on = true; ptr.x = e.clientX - rc.left; ptr.y = e.clientY - rc.top;
+  });
+  canvas.addEventListener('pointerleave', function () { ptr.on = false; });
+  canvas.addEventListener('pointercancel', function () { ptr.on = false; });
+
+  // ---- frame ----
+  var t0 = performance.now();
+  var touchBuf = new Float32Array(MAXT * 4), touchR = new Float32Array(MAXT);
+  var colM = new Float32Array(9);
+  function frame(now) {
+    var t = (now - t0) / 1000;
+    updateMat(t);
+
+    // the bump follows the pointer and holds while it rests; the trail fades behind it
+    if (ptr.on) {
+      var h = hit(ptr.x, ptr.y);
+      if (h) {
+        var last = touches[touches.length - 1];
+        var same = last && last.r === h.r &&
+          (h.x - last.x) * (h.x - last.x) + (h.y - last.y) * (h.y - last.y) + (h.z - last.z) * (h.z - last.z) < 0.0009;
+        if (same) last.t = now;
+        else { touches.push({ x: h.x, y: h.y, z: h.z, r: h.r, t: now }); if (touches.length > MAXT) touches.shift(); }
+      }
+    }
+    var live = [];
+    for (var a = 0; a < touches.length; a++) if (now - touches[a].t < 2600) live.push(touches[a]);
+    touches = live;
+    for (var b = 0; b < live.length; b++) {
+      var age = (now - live[b].t) / 1000;
+      touchBuf[b * 4] = live[b].x; touchBuf[b * 4 + 1] = live[b].y; touchBuf[b * 4 + 2] = live[b].z;
+      touchBuf[b * 4 + 3] = Math.exp(-age * 1.6);
+      touchR[b] = live[b].r;
+    }
+
+    colM[0] = m[0]; colM[1] = m[3]; colM[2] = m[6];
+    colM[3] = m[1]; colM[4] = m[4]; colM[5] = m[7];
+    colM[6] = m[2]; colM[7] = m[5]; colM[8] = m[8];
+
+    gl.clearColor(bg[0], bg[1], bg[2], 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.uniformMatrix3fv(U.uM, false, colM);
+    gl.uniform2f(U.uScale, R / (W / 2), R / (H / 2));
+    gl.uniform1f(U.uT, t);
+    gl.uniform1f(U.uIdle, reduce ? 0 : 1);
+    gl.uniform1i(U.uTN, live.length);
+    gl.uniform4fv(U.uTouch, touchBuf);
+    gl.uniform1fv(U.uTouchR, touchR);
+
+    // base mesh: faint, dense
+    gl.uniform1f(U.uLayer, 0); gl.uniform1f(U.uAmp, 0); gl.uniform1f(U.uPow, 1);
+    gl.uniform3f(U.uOff, 0, 0, 0); gl.uniform3f(U.uK1, 0, 0, 0); gl.uniform1f(U.uW1, 0); gl.uniform1f(U.uP1, 0); gl.uniform1f(U.uW2, 0);
+    // outer: neutral grey; middle: blue; inner: teal-green
+    gl.uniform3f(U.uColor, wire[0], wire[1], wire[2]);
+    gl.uniform3f(U.uColor1, 110/255, 135/255, 230/255);
+    gl.uniform3f(U.uColor2, 95/255, 190/255, 150/255);
+    gl.uniform1f(U.uAlphaF, 0.13); gl.uniform1f(U.uAlphaB, 0.05);
+    gl.drawElements(gl.LINES, idx.length, gl.UNSIGNED_INT, 0);
+
+    // wave strands, only where touched
+    if (live.length) {
+      gl.uniform1f(U.uLayer, 1);
+      gl.uniform1f(U.uAlphaF, 0.5); gl.uniform1f(U.uAlphaB, 0.18);
+      for (var L = 0; L < LAYERS.length; L++) {
+        var P = LAYERS[L];
+        gl.uniform1f(U.uAmp, P.a); gl.uniform1f(U.uPow, P.pw);
+        gl.uniform3f(U.uOff, P.off[0], P.off[1], P.off[2]);
+        gl.uniform3f(U.uK1, P.k1[0], P.k1[1], P.k1[2]);
+        gl.uniform1f(U.uW1, P.w1); gl.uniform1f(U.uP1, P.p1); gl.uniform1f(U.uW2, P.w2);
+        gl.uniform3f(U.uColor, P.col[0] / 255, P.col[1] / 255, P.col[2] / 255);
+        gl.drawElements(gl.LINES, idx.length, gl.UNSIGNED_INT, 0);
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
